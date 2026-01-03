@@ -161,119 +161,91 @@ export class WebMusicBridge {
             console.log('[AVSession] ====== SEEK START ======');
             console.log('[AVSession] Target time:', targetTime, 'seconds');
 
-            // 方法1: Howler.js API（网易云音乐使用 Howler）
-            if (window.Howler && window.Howler._howls && window.Howler._howls.length > 0) {
-              console.log('[AVSession] Found Howler with', window.Howler._howls.length, 'howls');
-              for (let i = 0; i < window.Howler._howls.length; i++) {
+            // 方法0: 使用我们追踪的活跃 Howl 实例（最可靠）
+            if (window.__avSessionSeek && typeof window.__avSessionSeek === 'function') {
+              seekSuccess = window.__avSessionSeek(targetTime);
+              if (seekSuccess) {
+                console.log('[AVSession] Seek via tracked Howl SUCCESS');
+              }
+            }
+
+            // 方法1: 使用 __avSessionGetActiveHowl 获取活跃实例
+            if (!seekSuccess && window.__avSessionGetActiveHowl) {
+              const activeHowl = window.__avSessionGetActiveHowl();
+              if (activeHowl && typeof activeHowl.seek === 'function') {
+                try {
+                  const beforePos = activeHowl.seek();
+                  console.log('[AVSession] Active Howl before seek:', beforePos);
+                  activeHowl.seek(targetTime);
+                  const afterPos = activeHowl.seek();
+                  console.log('[AVSession] Active Howl after seek:', afterPos);
+                  if (Math.abs(afterPos - targetTime) < 2) {
+                    seekSuccess = true;
+                    console.log('[AVSession] Active Howl seek SUCCESS');
+                  }
+                } catch (e) {
+                  console.error('[AVSession] Active Howl seek error:', e);
+                }
+              }
+            }
+
+            // 方法2: 遍历所有 Howl 实例，只对正在播放的进行 seek
+            if (!seekSuccess && window.Howler && window.Howler._howls) {
+              console.log('[AVSession] Trying all Howls, count:', window.Howler._howls.length);
+              for (let i = window.Howler._howls.length - 1; i >= 0; i--) {
                 const howl = window.Howler._howls[i];
-                if (howl && typeof howl.seek === 'function') {
+                if (howl && typeof howl.seek === 'function' && howl.playing && howl.playing()) {
                   try {
-                    const currentPos = howl.seek();
-                    console.log('[AVSession] Howl', i, 'current pos:', currentPos, 'playing:', howl.playing());
                     howl.seek(targetTime);
                     const newPos = howl.seek();
-                    console.log('[AVSession] Howl', i, 'new pos:', newPos);
-                    if (Math.abs(newPos - targetTime) < 1) {
+                    console.log('[AVSession] Howl', i, 'seeked to:', newPos);
+                    if (Math.abs(newPos - targetTime) < 2) {
                       seekSuccess = true;
-                      console.log('[AVSession] Howler seek SUCCESS');
+                      break;
                     }
                   } catch (e) {
-                    console.error('[AVSession] Howler seek error:', e);
+                    console.error('[AVSession] Howl', i, 'seek error:', e);
                   }
                 }
               }
-            } else {
-              console.log('[AVSession] Howler not found or no howls');
             }
 
-            // 方法2: 进度条 slider 模拟
-            const slider = document.querySelector('.slider-default input[type="range"]');
-            if (slider) {
-              const max = parseFloat(slider.max) || 1;
-              const currentValue = parseFloat(slider.value) || 0;
-              console.log('[AVSession] Slider found - current:', currentValue, 'max:', max, 'target:', targetTime);
-
-              // 使用原生 setter 绕过 React
-              const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value'
-              )?.set;
-
-              if (nativeInputValueSetter) {
-                nativeInputValueSetter.call(slider, targetTime);
-                console.log('[AVSession] Used native setter');
-              } else {
-                slider.value = targetTime.toString();
-                console.log('[AVSession] Used direct assignment');
-              }
-
-              // 触发完整的拖动事件序列
-              const rect = slider.getBoundingClientRect();
-              const percent = targetTime / max;
-              const clientX = rect.left + rect.width * percent;
-              const clientY = rect.top + rect.height / 2;
-
-              // mousedown -> mousemove -> input -> change -> mouseup
-              slider.dispatchEvent(new MouseEvent('mousedown', {
-                bubbles: true, cancelable: true, clientX, clientY, view: window
-              }));
-              slider.dispatchEvent(new MouseEvent('mousemove', {
-                bubbles: true, cancelable: true, clientX, clientY, view: window
-              }));
-              slider.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-              slider.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-              slider.dispatchEvent(new MouseEvent('mouseup', {
-                bubbles: true, cancelable: true, clientX, clientY, view: window
-              }));
-
-              console.log('[AVSession] Slider events dispatched, new value:', slider.value);
-            } else {
-              console.log('[AVSession] Slider not found');
-            }
-
-            // 方法3: 点击进度条轨道
-            const sliderWrapper = document.querySelector('.slider-default');
-            if (sliderWrapper && slider) {
-              const max = parseFloat(slider.max) || 1;
-              const percent = targetTime / max;
-              const rect = sliderWrapper.getBoundingClientRect();
-              const clickX = rect.left + rect.width * percent;
-              const clickY = rect.top + rect.height / 2;
-
-              sliderWrapper.dispatchEvent(new MouseEvent('click', {
-                bubbles: true, cancelable: true, clientX: clickX, clientY: clickY, view: window
-              }));
-              console.log('[AVSession] Track click at', (percent * 100).toFixed(1), '%');
-            }
-
-            // 方法4: 全局 player API
-            if (window.player && typeof window.player.seek === 'function') {
-              try {
-                window.player.seek(targetTime * 1000);
-                console.log('[AVSession] Called player.seek()');
-                seekSuccess = true;
-              } catch (e) {
-                console.error('[AVSession] player.seek error:', e);
-              }
-            }
-
-            // 方法5: 查找 Vue/React 组件实例
+            // 方法3: 进度条 slider 模拟（作为备用）
             if (!seekSuccess) {
-              const sliderEl = document.querySelector('.slider-default');
-              if (sliderEl) {
-                // Vue 2
-                if (sliderEl.__vue__ && sliderEl.__vue__.$emit) {
-                  sliderEl.__vue__.$emit('change', targetTime);
-                  console.log('[AVSession] Emitted Vue change event');
+              const slider = document.querySelector('.slider-default input[type="range"]');
+              if (slider) {
+                const max = parseFloat(slider.max) || 1;
+                console.log('[AVSession] Slider fallback - max:', max, 'target:', targetTime);
+
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value'
+                )?.set;
+
+                if (nativeInputValueSetter) {
+                  nativeInputValueSetter.call(slider, targetTime);
+                } else {
+                  slider.value = targetTime.toString();
                 }
-                // React
-                const reactKey = Object.keys(sliderEl).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-                if (reactKey) {
-                  console.log('[AVSession] Found React fiber, but cannot directly manipulate');
-                }
+
+                const rect = slider.getBoundingClientRect();
+                const percent = targetTime / max;
+                const clientX = rect.left + rect.width * percent;
+                const clientY = rect.top + rect.height / 2;
+
+                slider.dispatchEvent(new MouseEvent('mousedown', {
+                  bubbles: true, cancelable: true, clientX, clientY, view: window
+                }));
+                slider.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                slider.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                slider.dispatchEvent(new MouseEvent('mouseup', {
+                  bubbles: true, cancelable: true, clientX, clientY, view: window
+                }));
+
+                console.log('[AVSession] Slider events dispatched');
               }
             }
 
-            console.log('[AVSession] ====== SEEK END ======');
+            console.log('[AVSession] ====== SEEK END, success:', seekSuccess, '======');
           })();
         `;
         break;
@@ -325,7 +297,7 @@ export class WebMusicBridge {
   }
 
   // 注入 JavaScript 代码到网页，用于监听音频事件
-  // 针对网易云音乐网页版优化，使用精确选择器
+  // 针对网易云音乐网页版优化，追踪 Howler.js 实例
   public injectMusicMonitor(): void {
     if (this.isInjected) return;
 
@@ -349,8 +321,72 @@ export class WebMusicBridge {
           currentTime: 0,
           duration: 0,
           lastNotifyTime: 0,
-          sliderListenerAttached: false
+          sliderListenerAttached: false,
+          // Howler 追踪
+          activeHowlId: null,
+          howlInstances: new Map(), // id -> { howl, createdAt, lastSeek }
+          lastHowlCheck: 0
         };
+
+        // ========== Howler.js 追踪 ==========
+
+        // 获取当前活跃的 Howl 实例（正在播放的那个）
+        function getActiveHowl() {
+          if (!window.Howler || !window.Howler._howls) return null;
+
+          const howls = window.Howler._howls;
+          let activeHowl = null;
+          let latestTime = 0;
+
+          for (let i = 0; i < howls.length; i++) {
+            const howl = howls[i];
+            if (!howl) continue;
+
+            // 优先选择正在播放的
+            if (howl.playing && howl.playing()) {
+              // 如果有多个在播放，选择进度最大的（通常是最新的）
+              try {
+                const pos = howl.seek();
+                if (typeof pos === 'number' && pos >= latestTime) {
+                  latestTime = pos;
+                  activeHowl = howl;
+                  state.activeHowlId = i;
+                }
+              } catch (e) {}
+            }
+          }
+
+          // 如果没有正在播放的，返回最后一个有效的
+          if (!activeHowl && howls.length > 0) {
+            for (let i = howls.length - 1; i >= 0; i--) {
+              if (howls[i] && typeof howls[i].seek === 'function') {
+                activeHowl = howls[i];
+                state.activeHowlId = i;
+                break;
+              }
+            }
+          }
+
+          return activeHowl;
+        }
+
+        // 从 Howler 获取进度信息
+        function getProgressFromHowler() {
+          const howl = getActiveHowl();
+          if (!howl) return null;
+
+          try {
+            const currentTime = howl.seek();
+            const duration = howl.duration();
+
+            if (typeof currentTime === 'number' && typeof duration === 'number' && duration > 0) {
+              return { currentTime, duration, source: 'howler' };
+            }
+          } catch (e) {
+            console.error('[AVSession] Error getting Howler progress:', e);
+          }
+          return null;
+        }
 
         // ========== 工具函数 ==========
 
@@ -372,6 +408,13 @@ export class WebMusicBridge {
         // ========== 状态获取函数 ==========
 
         function checkPlayState() {
+          // 方法1: 从 Howler 获取播放状态
+          const howl = getActiveHowl();
+          if (howl && typeof howl.playing === 'function') {
+            return howl.playing();
+          }
+
+          // 方法2: 从 UI 获取
           try {
             const playBtn = document.getElementById('btn_pc_minibar_play');
             if (!playBtn) return null;
@@ -413,6 +456,13 @@ export class WebMusicBridge {
         }
 
         function getProgressInfo() {
+          // 优先从 Howler 获取（最准确）
+          const howlerProgress = getProgressFromHowler();
+          if (howlerProgress) {
+            return howlerProgress;
+          }
+
+          // 备用：从 slider 获取
           try {
             let currentTime = 0;
             let duration = 0;
@@ -433,9 +483,9 @@ export class WebMusicBridge {
                 }
               }
             }
-            return { currentTime, duration };
+            return { currentTime, duration, source: 'slider' };
           } catch (e) {
-            return { currentTime: 0, duration: 0 };
+            return { currentTime: 0, duration: 0, source: 'error' };
           }
         }
 
@@ -501,10 +551,17 @@ export class WebMusicBridge {
         // ========== 通知函数 ==========
 
         function notifyPlayStateChange(isPlaying, currentTime, duration, isFavorite, loopMode) {
+          // 验证进度数据的合理性
+          if (duration > 0 && currentTime > duration) {
+            console.warn('[AVSession] Invalid progress: currentTime > duration, correcting...');
+            currentTime = Math.min(currentTime, duration);
+          }
+
           try {
             if (window.__avSessionBridge && typeof window.__avSessionBridge.onPlayStateChange === 'function') {
               window.__avSessionBridge.onPlayStateChange(isPlaying, currentTime, duration, isFavorite, loopMode);
-              console.log('[AVSession] State:', isPlaying ? 'playing' : 'paused', 'pos:', currentTime.toFixed(1));
+              console.log('[AVSession] State:', isPlaying ? 'playing' : 'paused',
+                         'pos:', currentTime.toFixed(1), '/', duration.toFixed(1));
             } else {
               console.warn('[AVSession] Bridge not available for play state');
             }
@@ -527,10 +584,15 @@ export class WebMusicBridge {
         }
 
         function notifyTimeUpdate(currentTime, duration) {
+          // 验证进度数据的合理性
+          if (duration > 0 && currentTime > duration) {
+            console.warn('[AVSession] Invalid time update: currentTime > duration, skipping...');
+            return;
+          }
+
           try {
             if (window.__avSessionBridge && typeof window.__avSessionBridge.onTimeUpdate === 'function') {
               window.__avSessionBridge.onTimeUpdate(currentTime, duration);
-              console.log('[AVSession] Time update:', currentTime.toFixed(1), '/', duration.toFixed(1));
             }
           } catch (e) {
             console.error('[AVSession] Error notifying time update:', e);
@@ -548,35 +610,81 @@ export class WebMusicBridge {
             return;
           }
 
-          // 监听用户拖动进度条
+          // 记录上次上报的时间，避免频繁上报
+          let lastReportedTime = -1;
+          let lastReportTimestamp = 0;
+          const MIN_REPORT_INTERVAL = 200; // 最小上报间隔 200ms
+
+          function reportTimeUpdate(currentTime, duration, source) {
+            const now = Date.now();
+            // 如果时间变化超过 1 秒，或者距离上次上报超过 200ms，则上报
+            if (Math.abs(currentTime - lastReportedTime) >= 1 || now - lastReportTimestamp >= MIN_REPORT_INTERVAL) {
+              console.log('[AVSession] Slider', source, ':', currentTime.toFixed(1), '/', duration.toFixed(1));
+              if (duration > 0 && currentTime <= duration) {
+                notifyTimeUpdate(currentTime, duration);
+                lastReportedTime = currentTime;
+                lastReportTimestamp = now;
+              }
+            }
+          }
+
+          // 监听用户拖动进度条 - input 事件（拖动过程中持续触发）
           slider.addEventListener('input', (e) => {
             const currentTime = parseFloat(e.target.value) || 0;
             const duration = parseFloat(e.target.max) || 0;
-            console.log('[AVSession] Slider input:', currentTime.toFixed(1), '/', duration.toFixed(1));
-            notifyTimeUpdate(currentTime, duration);
+            reportTimeUpdate(currentTime, duration, 'input');
           });
 
+          // 监听用户拖动进度条 - change 事件（拖动结束时触发）
           slider.addEventListener('change', (e) => {
             const currentTime = parseFloat(e.target.value) || 0;
             const duration = parseFloat(e.target.max) || 0;
+            // change 事件强制上报
             console.log('[AVSession] Slider change:', currentTime.toFixed(1), '/', duration.toFixed(1));
-            notifyTimeUpdate(currentTime, duration);
+            if (duration > 0 && currentTime <= duration) {
+              notifyTimeUpdate(currentTime, duration);
+              lastReportedTime = currentTime;
+              lastReportTimestamp = Date.now();
+            }
           });
 
-          // 监听 slider 的 value 属性变化（播放进度自动更新）
+          // 监听 mouseup 事件（用户释放鼠标时）
+          slider.addEventListener('mouseup', (e) => {
+            const currentTime = parseFloat(slider.value) || 0;
+            const duration = parseFloat(slider.max) || 0;
+            console.log('[AVSession] Slider mouseup:', currentTime.toFixed(1), '/', duration.toFixed(1));
+            if (duration > 0 && currentTime <= duration) {
+              notifyTimeUpdate(currentTime, duration);
+              lastReportedTime = currentTime;
+              lastReportTimestamp = Date.now();
+            }
+          });
+
+          // 监听 touchend 事件（触摸设备）
+          slider.addEventListener('touchend', (e) => {
+            const currentTime = parseFloat(slider.value) || 0;
+            const duration = parseFloat(slider.max) || 0;
+            console.log('[AVSession] Slider touchend:', currentTime.toFixed(1), '/', duration.toFixed(1));
+            if (duration > 0 && currentTime <= duration) {
+              notifyTimeUpdate(currentTime, duration);
+              lastReportedTime = currentTime;
+              lastReportTimestamp = Date.now();
+            }
+          });
+
+          // 使用 MutationObserver 监听 value 属性变化（捕获程序化修改）
           const sliderObserver = new MutationObserver((mutations) => {
             for (const mutation of mutations) {
               if (mutation.type === 'attributes' && mutation.attributeName === 'value') {
                 const currentTime = parseFloat(slider.value) || 0;
                 const duration = parseFloat(slider.max) || 0;
-                // 只在播放时更新，避免频繁通知
-                if (state.isPlaying && Math.abs(currentTime - state.currentTime) >= 1) {
-                  state.currentTime = currentTime;
-                  // 每2秒同步一次
-                  const now = Date.now();
-                  if (now - state.lastNotifyTime >= 2000) {
-                    state.lastNotifyTime = now;
+                // 只有当时间变化超过 2 秒时才认为是用户 seek 操作
+                if (Math.abs(currentTime - lastReportedTime) >= 2) {
+                  console.log('[AVSession] Slider value attr changed:', currentTime.toFixed(1), '/', duration.toFixed(1));
+                  if (duration > 0 && currentTime <= duration) {
                     notifyTimeUpdate(currentTime, duration);
+                    lastReportedTime = currentTime;
+                    lastReportTimestamp = Date.now();
                   }
                 }
               }
@@ -584,8 +692,26 @@ export class WebMusicBridge {
           });
           sliderObserver.observe(slider, { attributes: true, attributeFilter: ['value'] });
 
+          // 监听进度条容器的点击事件（用户点击进度条跳转）
+          const sliderWrapper = slider.closest('.slider-default') || slider.parentElement;
+          if (sliderWrapper) {
+            sliderWrapper.addEventListener('click', (e) => {
+              // 延迟获取值，等待 slider 更新
+              setTimeout(() => {
+                const currentTime = parseFloat(slider.value) || 0;
+                const duration = parseFloat(slider.max) || 0;
+                console.log('[AVSession] Slider wrapper click:', currentTime.toFixed(1), '/', duration.toFixed(1));
+                if (duration > 0 && currentTime <= duration) {
+                  notifyTimeUpdate(currentTime, duration);
+                  lastReportedTime = currentTime;
+                  lastReportTimestamp = Date.now();
+                }
+              }, 50);
+            });
+          }
+
           state.sliderListenerAttached = true;
-          console.log('[AVSession] Slider listener attached');
+          console.log('[AVSession] Slider listener attached with multiple event handlers');
         }
 
         // ========== 主监控函数 ==========
