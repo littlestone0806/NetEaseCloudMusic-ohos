@@ -261,8 +261,8 @@ struct WebComponent {
   private injectCustomJS(): void {
     const jsScript = `
        function tryFind() {
-         const el = document.querySelector('.HeaderRow_h1n2o69r');
-         const c = document.querySelector('.Container_cv1ujvp');
+         constel=document.querySelector('[class*=HeaderRow_]');
+         constc=document.querySelector('[class*=Container_]');
          if (el) {
            el.style.gridTemplateColumns = '28px 8px 258px 8px 36px 20px auto 20px 180px';
            c.style.height = '60px';
