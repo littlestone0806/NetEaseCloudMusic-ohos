@@ -260,17 +260,16 @@ struct WebComponent {
   private windowStage = AppStorage.get('window') as window.WindowStage;
   private injectCustomJS(): void {
     const jsScript = `
-       function tryFind() {
-         constel=document.querySelector('[class*=HeaderRow_]');
-         constc=document.querySelector('[class*=Container_]');
-         if (el) {
-           el.style.gridTemplateColumns = '28px 8px 258px 8px 36px 20px auto 20px 180px';
-           c.style.height = '60px';
+       function modifyMainNavStyle() {
+         const navContainer = document.getElementById('page_pc_main_nav');
+         if (navContainer) {
+           navContainer.style.height = '60px';
+           navContainer.style.padding = '0 150px 0 40px';
          } else {
-           setTimeout(tryFind, 100);
+           setTimeout(modifyMainNavStyle, 100);
          }
        }
-       tryFind(); // 启动检测
+       modifyMainNavStyle(); // 启动检测
      `;
      try {
        this.controller.runJavaScript(jsScript);
