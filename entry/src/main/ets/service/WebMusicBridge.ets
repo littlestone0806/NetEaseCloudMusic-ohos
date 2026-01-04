@@ -3,9 +3,12 @@ import { avSession as AVSessionManager } from '@kit.AVSessionKit';
 import { AVSessionService, MediaInfo, PlaybackInfo, AVSessionCallback } from './AVSessionService';
 import { PreferencesUtil } from '../utiles/PreferencesHelper';
 import { LyricService } from './LyricService';
+import { QualityService, QualityUrlData } from './QualityService';
 
 // 持久化存储的 key
 const LAST_SONG_ID_KEY = 'lastSongId';
+const QUALITY_REPLACE_ENABLED_KEY = 'qualityReplaceEnabled';
+const QUALITY_REPLACE_LEVEL_KEY = 'qualityReplaceLevel';
 
 // 从网页端接收的媒体信息接口
 interface WebMediaInfo {
@@ -34,26 +37,39 @@ export interface AVSessionBridgeObject {
     isFavorite?: boolean, loopMode?: string) => void;
   onTimeUpdate: (currentTime: number, duration: number) => void;
   onSongInfoChange: (info: WebMediaInfo) => void;
+  onQualitySettingsChange: (enabled: boolean, level: string) => void;
+  fetchQualityUrl: (songId: number, level: string) => Promise<string>;
 }
 
 /**
  * Web 与 AVSession 桥接类
  * 负责在 ArkWeb 和 AVSession 之间建立双向通信
  */
+interface QualitySettings {
+  enabled: boolean;
+  level: string;
+}
+
 export class WebMusicBridge {
   private controller: webview.WebviewController;
   private avSessionService: AVSessionService;
   private lyricService: LyricService;
+  private qualityService: QualityService;
   private isInjected: boolean = false;
   private currentMediaId: string = '';
   private currentSongId: number = 0; // 网易云音乐歌曲 ID（通过网络请求拦截获取）
+  // 音质替换设置
+  private qualityReplaceEnabled: boolean = false;
+  private qualityReplaceLevel: string = 'exhigh';
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
     this.avSessionService = AVSessionService.getInstance();
     this.lyricService = LyricService.getInstance();
+    this.qualityService = QualityService.getInstance();
     this.setupAVSessionCallbacks();
     this.loadLastSongId();
+    this.loadQualitySettings();
   }
 
   // 从持久化存储加载上次保存的歌曲 ID
@@ -82,6 +98,42 @@ export class WebMusicBridge {
     } catch (err) {
       console.error(`[WebMusicBridge] Failed to save song ID: ${err}`);
     }
+  }
+
+  // 加载音质替换设置
+  private loadQualitySettings(): void {
+    try {
+      if (PreferencesUtil.isInitialized()) {
+        this.qualityReplaceEnabled = PreferencesUtil.get<boolean>(QUALITY_REPLACE_ENABLED_KEY, false);
+        this.qualityReplaceLevel = PreferencesUtil.get<string>(QUALITY_REPLACE_LEVEL_KEY, 'exhigh');
+        console.info(`[WebMusicBridge] Loaded quality settings: enabled=${this.qualityReplaceEnabled}, level=${this.qualityReplaceLevel}`);
+      }
+    } catch (err) {
+      console.error(`[WebMusicBridge] Failed to load quality settings: ${err}`);
+    }
+  }
+
+  // 保存音质替换设置
+  public saveQualitySettings(enabled: boolean, level: string): void {
+    try {
+      if (PreferencesUtil.isInitialized()) {
+        this.qualityReplaceEnabled = enabled;
+        this.qualityReplaceLevel = level;
+        PreferencesUtil.put(QUALITY_REPLACE_ENABLED_KEY, enabled);
+        PreferencesUtil.put(QUALITY_REPLACE_LEVEL_KEY, level);
+        console.info(`[WebMusicBridge] Saved quality settings: enabled=${enabled}, level=${level}`);
+      }
+    } catch (err) {
+      console.error(`[WebMusicBridge] Failed to save quality settings: ${err}`);
+    }
+  }
+
+  // 获取音质替换设置
+  public getQualitySettings(): QualitySettings {
+    return {
+      enabled: this.qualityReplaceEnabled,
+      level: this.qualityReplaceLevel
+    };
   }
 
   // 获取当前歌曲 ID（优先使用拦截到的 ID，否则使用持久化存储的 ID）
@@ -346,6 +398,9 @@ export class WebMusicBridge {
 
     // 获取上次保存的歌曲 ID，用于初始化
     const lastSongId = this.currentSongId;
+    // 获取音质替换设置
+    const qualityEnabled = this.qualityReplaceEnabled;
+    const qualityLevel = this.qualityReplaceLevel;
 
     const jsCode = `
       (function() {
@@ -379,12 +434,119 @@ export class WebMusicBridge {
           lastHowlCheck: 0,
           // 网络拦截获取的歌曲 ID
           interceptedSongId: LAST_SAVED_SONG_ID, // 使用上次保存的歌曲 ID 作为初始值
-          lastInterceptedSongId: 0
+          lastInterceptedSongId: 0,
+          // 音质替换设置
+          qualityReplaceEnabled: ${qualityEnabled},
+          qualityReplaceLevel: '${qualityLevel}',
+          // 待替换的高音质 URL
+          pendingQualityUrl: null,
+          pendingQualitySongId: null,
+          // 开发者控制台日志
+          consoleLogs: [],
+          maxConsoleLogs: 500
         };
+
+        // ========== 开发者控制台 - Console 拦截 ==========
+        const originalConsole = {
+          log: console.log.bind(console),
+          info: console.info.bind(console),
+          warn: console.warn.bind(console),
+          error: console.error.bind(console)
+        };
+
+        function formatLogArgs(args) {
+          return Array.from(args).map(arg => {
+            if (arg === null) return 'null';
+            if (arg === undefined) return 'undefined';
+            if (typeof arg === 'object') {
+              try {
+                return JSON.stringify(arg, null, 2);
+              } catch (e) {
+                return String(arg);
+              }
+            }
+            return String(arg);
+          }).join(' ');
+        }
+
+        function addLogEntry(level, args) {
+          const entry = {
+            timestamp: new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 }),
+            level: level,
+            message: formatLogArgs(args)
+          };
+          state.consoleLogs.push(entry);
+          if (state.consoleLogs.length > state.maxConsoleLogs) {
+            state.consoleLogs.shift();
+          }
+          // 更新控制台 UI
+          updateDevConsoleUI(entry);
+        }
+
+        console.log = function(...args) {
+          addLogEntry('log', args);
+          originalConsole.log.apply(console, args);
+        };
+        console.info = function(...args) {
+          addLogEntry('info', args);
+          originalConsole.info.apply(console, args);
+        };
+        console.warn = function(...args) {
+          addLogEntry('warn', args);
+          originalConsole.warn.apply(console, args);
+        };
+        console.error = function(...args) {
+          addLogEntry('error', args);
+          originalConsole.error.apply(console, args);
+        };
+
+        // 更新开发者控制台 UI
+        function updateDevConsoleUI(entry) {
+          const consoleContent = document.getElementById('dev-console-content');
+          if (!consoleContent) return;
+
+          const logLine = document.createElement('div');
+          logLine.className = 'dev-console-line dev-console-' + entry.level;
+
+          const timestamp = document.createElement('span');
+          timestamp.className = 'dev-console-timestamp';
+          timestamp.textContent = entry.timestamp;
+
+          const level = document.createElement('span');
+          level.className = 'dev-console-level';
+          level.textContent = '[' + entry.level.toUpperCase() + ']';
+
+          const message = document.createElement('span');
+          message.className = 'dev-console-message';
+          message.textContent = entry.message;
+
+          logLine.appendChild(timestamp);
+          logLine.appendChild(level);
+          logLine.appendChild(message);
+          consoleContent.appendChild(logLine);
+
+          // 自动滚动到底部
+          consoleContent.scrollTop = consoleContent.scrollHeight;
+        }
 
         // ========== 网络请求拦截 ==========
         // 通过拦截 weapi/song/enhance/player/url/v1 接口获取真实歌曲 ID
         const TARGET_PATH = 'weapi/song/enhance/player/url/v1';
+
+        // 异步获取高音质 URL
+        async function fetchQualityUrlFromNative(songId, level) {
+          if (!window.__avSessionBridge || !window.__avSessionBridge.fetchQualityUrl) {
+            console.warn('[AVSession] fetchQualityUrl not available');
+            return null;
+          }
+          try {
+            const url = await window.__avSessionBridge.fetchQualityUrl(songId, level);
+            return url || null;
+          } catch (e) {
+            console.error('[AVSession] Failed to fetch quality URL:', e);
+            return null;
+          }
+        }
 
         // 拦截 XMLHttpRequest
         const originalXhrOpen = XMLHttpRequest.prototype.open;
@@ -392,52 +554,150 @@ export class WebMusicBridge {
 
         XMLHttpRequest.prototype.open = function(method, url, ...args) {
           this._avSessionUrl = url;
+          this._avSessionMethod = method;
           return originalXhrOpen.apply(this, [method, url, ...args]);
         };
 
         XMLHttpRequest.prototype.send = function(body) {
-          this.addEventListener('load', function() {
-            if (this._avSessionUrl && this._avSessionUrl.indexOf(TARGET_PATH) > -1) {
-              try {
-                const res = JSON.parse(this.responseText);
-                if (res.data && res.data[0] && res.data[0].id) {
-                  const songId = res.data[0].id;
-                  console.log('[AVSession] XHR Intercepted song ID:', songId);
-                  state.interceptedSongId = songId;
-                  // 通知歌曲 ID 变化
-                  notifySongIdChange(songId);
+          const xhr = this;
+          const isTargetRequest = xhr._avSessionUrl && xhr._avSessionUrl.indexOf(TARGET_PATH) > -1;
+
+          if (isTargetRequest && state.qualityReplaceEnabled) {
+            // 音质替换模式：拦截响应并替换 URL
+            xhr.addEventListener('readystatechange', async function() {
+              if (xhr.readyState === 4 && xhr.status === 200) {
+                try {
+                  const res = JSON.parse(xhr.responseText);
+                  if (res.data && res.data[0] && res.data[0].id) {
+                    const songId = res.data[0].id;
+                    console.log('[AVSession] XHR Intercepted song ID:', songId);
+                    state.interceptedSongId = songId;
+                    notifySongIdChange(songId);
+
+                    // 获取高音质 URL
+                    const qualityUrl = await fetchQualityUrlFromNative(songId, state.qualityReplaceLevel);
+                    if (qualityUrl) {
+                      console.log('[AVSession] Replacing URL with quality:', state.qualityReplaceLevel);
+                      // 由于无法直接修改 responseText，我们通过修改 Howler 的 src 来实现
+                      state.pendingQualityUrl = qualityUrl;
+                      state.pendingQualitySongId = songId;
+                    }
+                  }
+                } catch (e) {
+                  console.error('[AVSession] XHR parse error:', e);
                 }
-              } catch (e) {
-                console.error('[AVSession] XHR parse error:', e);
               }
-            }
-          });
+            });
+          } else {
+            // 普通模式：只记录歌曲 ID
+            xhr.addEventListener('load', function() {
+              if (isTargetRequest) {
+                try {
+                  const res = JSON.parse(xhr.responseText);
+                  if (res.data && res.data[0] && res.data[0].id) {
+                    const songId = res.data[0].id;
+                    console.log('[AVSession] XHR Intercepted song ID:', songId);
+                    state.interceptedSongId = songId;
+                    notifySongIdChange(songId);
+                  }
+                } catch (e) {
+                  console.error('[AVSession] XHR parse error:', e);
+                }
+              }
+            });
+          }
           return originalXhrSend.apply(this, [body]);
         };
 
         // 拦截 Fetch
         const originalFetch = window.fetch;
         window.fetch = async function(...args) {
-          const response = await originalFetch(...args);
-
           let url = '';
           if (typeof args[0] === 'string') url = args[0];
           else if (args[0] instanceof Request) url = args[0].url;
 
-          if (url && url.indexOf(TARGET_PATH) > -1) {
+          const isTargetRequest = url && url.indexOf(TARGET_PATH) > -1;
+
+          if (isTargetRequest && state.qualityReplaceEnabled) {
+            // 音质替换模式
+            const response = await originalFetch(...args);
             const clone = response.clone();
-            clone.json().then(data => {
+
+            try {
+              const data = await clone.json();
               if (data.data && data.data[0] && data.data[0].id) {
                 const songId = data.data[0].id;
                 console.log('[AVSession] Fetch Intercepted song ID:', songId);
                 state.interceptedSongId = songId;
-                // 通知歌曲 ID 变化
                 notifySongIdChange(songId);
+
+                // 获取高音质 URL
+                const qualityUrl = await fetchQualityUrlFromNative(songId, state.qualityReplaceLevel);
+                if (qualityUrl) {
+                  console.log('[AVSession] Replacing Fetch URL with quality:', state.qualityReplaceLevel);
+                  // 修改响应数据
+                  data.data[0].url = qualityUrl;
+                  // 创建新的响应
+                  const modifiedResponse = new Response(JSON.stringify(data), {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: response.headers
+                  });
+                  return modifiedResponse;
+                }
               }
-            }).catch(err => console.error('[AVSession] Fetch parse error:', err));
+            } catch (e) {
+              console.error('[AVSession] Fetch parse error:', e);
+            }
+
+            return response;
+          } else {
+            // 普通模式
+            const response = await originalFetch(...args);
+
+            if (isTargetRequest) {
+              const clone = response.clone();
+              clone.json().then(data => {
+                if (data.data && data.data[0] && data.data[0].id) {
+                  const songId = data.data[0].id;
+                  console.log('[AVSession] Fetch Intercepted song ID:', songId);
+                  state.interceptedSongId = songId;
+                  notifySongIdChange(songId);
+                }
+              }).catch(err => console.error('[AVSession] Fetch parse error:', err));
+            }
+            return response;
           }
-          return response;
         };
+
+        // 拦截 Howler.js 的音频加载，替换为高音质 URL
+        function interceptHowlerSrc() {
+          if (!window.Howl) return;
+
+          const OriginalHowl = window.Howl;
+          window.Howl = function(options) {
+            // 检查是否有待替换的高音质 URL
+            if (state.qualityReplaceEnabled && state.pendingQualityUrl && options.src) {
+              console.log('[AVSession] Intercepting Howl src, replacing with quality URL');
+              if (Array.isArray(options.src)) {
+                options.src = [state.pendingQualityUrl];
+              } else {
+                options.src = state.pendingQualityUrl;
+              }
+              state.pendingQualityUrl = null;
+              state.pendingQualitySongId = null;
+            }
+            return new OriginalHowl(options);
+          };
+          // 复制原型和静态属性
+          window.Howl.prototype = OriginalHowl.prototype;
+          Object.keys(OriginalHowl).forEach(key => {
+            window.Howl[key] = OriginalHowl[key];
+          });
+        }
+
+        // 延迟执行 Howler 拦截，确保 Howler 已加载
+        setTimeout(interceptHowlerSrc, 1000);
 
         console.log('[AVSession] Network interceptor installed for:', TARGET_PATH);
 
@@ -514,6 +774,375 @@ export class WebMusicBridge {
           // 首次延迟 300ms 后开始尝试
           setTimeout(tryNotify, 300);
         }
+
+        // ========== 设置页面 UI 注入 ==========
+
+        // 音质等级映射
+        const QUALITY_LEVELS = [
+          { value: 'standard', label: '标准' },
+          { value: 'higher', label: '较高' },
+          { value: 'exhigh', label: '极高' },
+          { value: 'lossless', label: '无损' },
+          { value: 'hires', label: 'Hi-Res' }
+        ];
+
+        // 注入设置页面 UI
+        function injectSettingsUI() {
+          const playSection = document.getElementById('play');
+          if (!playSection) return false;
+
+          // 检查是否已经注入
+          if (document.getElementById('quality-replace-setting')) return true;
+
+          console.log('[AVSession] Injecting quality replace settings UI...');
+
+          // 找到 play section 内的 .play 容器
+          const playContainer = playSection.querySelector('.play');
+          if (!playContainer) return false;
+
+          // 创建设置项，使用与原有设置一致的结构
+          const settingSection = document.createElement('section');
+          settingSection.id = 'quality-replace-setting';
+          settingSection.className = 'item list';
+
+          // 创建标题，使用与原有 h4 一致的结构
+          const title = document.createElement('h4');
+          title.textContent = '音质替换';
+
+          // 创建 checkbox 容器，模仿原有样式
+          const checkboxWrapper = document.createElement('span');
+          checkboxWrapper.className = 'list-item';
+
+          const checkboxLabel = document.createElement('span');
+          checkboxLabel.className = 'cmd-checkbox ' + (state.qualityReplaceEnabled ? 'cmd-checkbox-checked' : 'cmd-checkbox-unChecked') + ' cmd-checkbox-cardType_unDisabled CheckboxWrapper_c1o7uw4l';
+          checkboxLabel.style.cursor = 'pointer';
+
+          const checkboxInner = document.createElement('span');
+          checkboxInner.className = 'cmd-checkbox-inner' + (state.qualityReplaceEnabled ? ' cmd-checkbox-inner-checked' : '');
+
+          const checkboxInput = document.createElement('input');
+          checkboxInput.type = 'checkbox';
+          checkboxInput.id = 'quality-replace-checkbox';
+          checkboxInput.className = 'cmd-checkbox-input';
+          checkboxInput.checked = state.qualityReplaceEnabled;
+          checkboxInput.setAttribute('aria-checked', state.qualityReplaceEnabled ? 'true' : 'false');
+          checkboxInput.setAttribute('aria-label', '启用强制音质替换');
+          checkboxInput.setAttribute('aria-labelledby', 'addon-quality-replace');
+
+          const checkboxDisplay = document.createElement('span');
+          checkboxDisplay.className = 'cmd-checkbox-inner-display';
+          if (state.qualityReplaceEnabled) {
+            checkboxDisplay.innerHTML = '<span role="img" aria-label="checkbox_tick" class="cmd-icon cmd-icon-default cmd-icon-checkbox_tick IconStyle_i7u766h"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" focusable="false" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M17.4111 7.30848C18.0692 7.81171 18.1947 8.75312 17.6915 9.41119L11.1915 17.9112C10.909 18.2806 10.4711 18.4981 10.0061 18.5C9.54105 18.5019 9.10143 18.288 8.81592 17.9209L5.31592 13.4209C4.80731 12.767 4.92512 11.8246 5.57904 11.316C6.23296 10.8074 7.17537 10.9252 7.68398 11.5791L9.98988 14.5438L15.3084 7.58884C15.8116 6.93077 16.7531 6.80525 17.4111 7.30848Z" fill="currentColor"></path></svg></span>';
+          }
+
+          checkboxInner.appendChild(checkboxInput);
+          checkboxInner.appendChild(checkboxDisplay);
+
+          const checkboxContent = document.createElement('div');
+          checkboxContent.className = 'cmd-checkbox-content';
+
+          const checkboxAddon = document.createElement('span');
+          checkboxAddon.className = 'cmd-checkbox-addon';
+          checkboxAddon.id = 'addon-quality-replace';
+
+          const checkboxText = document.createElement('div');
+          checkboxText.className = 'text';
+          checkboxText.textContent = '启用强制音质替换';
+
+          checkboxAddon.appendChild(checkboxText);
+          checkboxContent.appendChild(checkboxAddon);
+          checkboxLabel.appendChild(checkboxInner);
+          checkboxLabel.appendChild(checkboxContent);
+          checkboxWrapper.appendChild(checkboxLabel);
+
+          // 创建音质选择容器，每个音质选项作为单独的 list-item
+          const radioContainer = document.createElement('div');
+          radioContainer.id = 'quality-level-radios';
+          radioContainer.style.marginTop = '12px';
+          // 根据 checkbox 初始状态设置显示/隐藏
+          radioContainer.style.display = state.qualityReplaceEnabled ? 'block' : 'none';
+
+          // 使用 radio 按钮组，每个选项使用与原有一致的结构
+          QUALITY_LEVELS.forEach((level, index) => {
+            const listItem = document.createElement('span');
+            listItem.className = 'list-item';
+            listItem.style.marginBottom = '8px';
+            listItem.style.display = 'block';
+
+            const radioLabel = document.createElement('label');
+            radioLabel.className = 'cmd-radio' + (level.value === state.qualityReplaceLevel ? ' cmd-radio-checked' : '') + ' RadioWrapper_rg5xp5q';
+
+            const radioInner = document.createElement('span');
+            radioInner.className = 'cmd-radio-inner' + (level.value === state.qualityReplaceLevel ? ' cmd-radio-inner-checked' : '');
+
+            const radioInput = document.createElement('input');
+            radioInput.type = 'radio';
+            radioInput.name = 'quality-level';
+            radioInput.value = level.value;
+            radioInput.checked = level.value === state.qualityReplaceLevel;
+            radioInput.setAttribute('aria-describedby', '');
+            radioInput.setAttribute('aria-labelledby', 'addon-quality-' + level.value);
+
+            const radioDisplay = document.createElement('span');
+            radioDisplay.className = 'cmd-radio-inner-display';
+            if (level.value === state.qualityReplaceLevel) {
+              radioDisplay.innerHTML = '<span role="img" aria-label="radio" class="cmd-icon cmd-icon-default cmd-icon-radio IconStyle_i7u766h"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" focusable="false" aria-hidden="true"><circle cx="12" cy="12" r="5" fill="currentColor"></circle></svg></span>';
+            }
+
+            radioInner.appendChild(radioInput);
+            radioInner.appendChild(radioDisplay);
+
+            const radioContent = document.createElement('div');
+            radioContent.className = 'cmd-radio-content';
+
+            const radioAddon = document.createElement('span');
+            radioAddon.className = 'cmd-radio-addon';
+            radioAddon.id = 'addon-quality-' + level.value;
+
+            const radioText = document.createElement('span');
+            radioText.className = 'text';
+            radioText.textContent = level.label;
+
+            radioAddon.appendChild(radioText);
+            radioContent.appendChild(radioAddon);
+            radioLabel.appendChild(radioInner);
+            radioLabel.appendChild(radioContent);
+            listItem.appendChild(radioLabel);
+
+            // 事件监听
+            radioInput.addEventListener('change', function() {
+              if (this.checked) {
+                state.qualityReplaceLevel = this.value;
+                saveQualitySettings();
+                console.log('[AVSession] Quality replace level:', this.value);
+                // 更新所有 radio 的样式
+                radioContainer.querySelectorAll('.cmd-radio').forEach(r => {
+                  const input = r.querySelector('input');
+                  const inner = r.querySelector('.cmd-radio-inner');
+                  const display = r.querySelector('.cmd-radio-inner-display');
+                  if (input.checked) {
+                    r.classList.add('cmd-radio-checked');
+                    inner.classList.add('cmd-radio-inner-checked');
+                    display.innerHTML = '<span role="img" aria-label="radio" class="cmd-icon cmd-icon-default cmd-icon-radio IconStyle_i7u766h"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" focusable="false" aria-hidden="true"><circle cx="12" cy="12" r="5" fill="currentColor"></circle></svg></span>';
+                  } else {
+                    r.classList.remove('cmd-radio-checked');
+                    inner.classList.remove('cmd-radio-inner-checked');
+                    display.innerHTML = '';
+                  }
+                });
+              }
+            });
+
+            radioContainer.appendChild(listItem);
+          });
+
+          settingSection.appendChild(title);
+          settingSection.appendChild(checkboxWrapper);
+          settingSection.appendChild(radioContainer);
+
+          // 插入到 play 容器的末尾
+          playContainer.appendChild(settingSection);
+
+          // 更新 checkbox 样式和状态的函数
+          function updateCheckboxState(checked) {
+            state.qualityReplaceEnabled = checked;
+            checkboxInput.checked = checked;
+            saveQualitySettings();
+            console.log('[AVSession] Quality replace enabled:', checked);
+
+            // 更新样式
+            if (checked) {
+              checkboxLabel.classList.remove('cmd-checkbox-unChecked');
+              checkboxLabel.classList.add('cmd-checkbox-checked');
+              checkboxInner.classList.add('cmd-checkbox-inner-checked');
+              checkboxDisplay.innerHTML = '<span role="img" aria-label="checkbox_tick" class="cmd-icon cmd-icon-default cmd-icon-checkbox_tick IconStyle_i7u766h"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" focusable="false" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M17.4111 7.30848C18.0692 7.81171 18.1947 8.75312 17.6915 9.41119L11.1915 17.9112C10.909 18.2806 10.4711 18.4981 10.0061 18.5C9.54105 18.5019 9.10143 18.288 8.81592 17.9209L5.31592 13.4209C4.80731 12.767 4.92512 11.8246 5.57904 11.316C6.23296 10.8074 7.17537 10.9252 7.68398 11.5791L9.98988 14.5438L15.3084 7.58884C15.8116 6.93077 16.7531 6.80525 17.4111 7.30848Z" fill="currentColor"></path></svg></span>';
+              radioContainer.style.display = 'block';
+            } else {
+              checkboxLabel.classList.add('cmd-checkbox-unChecked');
+              checkboxLabel.classList.remove('cmd-checkbox-checked');
+              checkboxInner.classList.remove('cmd-checkbox-inner-checked');
+              checkboxDisplay.innerHTML = '';
+              radioContainer.style.display = 'none';
+            }
+            checkboxInput.setAttribute('aria-checked', checked ? 'true' : 'false');
+          }
+
+          // 在整个 checkboxLabel 上添加点击事件
+          checkboxLabel.addEventListener('click', function(e) {
+            // 如果点击的是 input 本身，让 input 的 change 事件处理
+            if (e.target === checkboxInput) return;
+            // 切换状态
+            updateCheckboxState(!checkboxInput.checked);
+          });
+
+          // Checkbox input 的 change 事件
+          checkboxInput.addEventListener('change', function() {
+            updateCheckboxState(this.checked);
+          });
+
+          console.log('[AVSession] Quality replace settings UI injected');
+          return true;
+        }
+
+        // 保存音质设置到 Native
+        function saveQualitySettings() {
+          if (window.__avSessionBridge && window.__avSessionBridge.onQualitySettingsChange) {
+            window.__avSessionBridge.onQualitySettingsChange(state.qualityReplaceEnabled, state.qualityReplaceLevel);
+          }
+        }
+
+        // ========== 开发者控制台 UI 注入 ==========
+        function injectDevConsoleUI() {
+          const settingsPage = document.getElementById('page_pc_setting');
+          if (!settingsPage) return false;
+
+          // 检查是否已经注入
+          if (document.getElementById('dev-console-section')) return true;
+
+          console.log('[AVSession] Injecting developer console UI...');
+
+          // 1. 在侧边导航栏添加"开发者控制台"链接
+          const anchorWrapper = settingsPage.querySelector('.cmd-anchor-link-wrapper');
+          if (anchorWrapper) {
+            const navItem = document.createElement('div');
+            navItem.className = 'cmd-anchor-link';
+            navItem.setAttribute('role', 'listitem');
+            navItem.innerHTML = '<div role="link" tabindex="0" aria-disabled="false" title="开发者控制台" class="cmd-anchor-link-title">开发者控制台</div><div role="list"></div>';
+
+            // 点击事件
+            navItem.querySelector('.cmd-anchor-link-title').addEventListener('click', function() {
+              // 移除其他 active 状态
+              anchorWrapper.querySelectorAll('.cmd-anchor-link-title').forEach(el => {
+                el.classList.remove('cmd-anchor-link-title-active');
+                el.removeAttribute('aria-details');
+              });
+              // 添加 active 状态
+              this.classList.add('cmd-anchor-link-title-active');
+              this.setAttribute('aria-details', 'active');
+              // 滚动到控制台区域
+              const consoleSection = document.getElementById('dev-console-section');
+              if (consoleSection) {
+                consoleSection.scrollIntoView({ behavior: 'smooth' });
+              }
+            });
+
+            anchorWrapper.appendChild(navItem);
+          }
+
+          // 2. 创建开发者控制台 section，使用与原有 section 一致的结构
+          const consoleSection = document.createElement('section');
+          consoleSection.id = 'dev-console-section';
+          consoleSection.className = 'Content_c1hxvhpe';
+          consoleSection.innerHTML = \`
+            <h3>开发者控制台</h3>
+            <div class="dev-console-container" style="background: #1e1e1e; border-radius: 8px; overflow: hidden;">
+              <div class="dev-console-toolbar" style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: #2d2d2d; border-bottom: 1px solid #3d3d3d;">
+                <span style="color: #d4d4d4; font-size: 12px;">Console Output</span>
+                <button id="dev-console-clear" style="padding: 4px 12px; background: #404040; color: #d4d4d4; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">清空</button>
+              </div>
+              <div id="dev-console-content" style="height: 400px; overflow-y: auto; padding: 8px 12px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 12px; line-height: 1.6;"></div>
+            </div>
+            <style>
+              .dev-console-line {
+                display: flex;
+                gap: 8px;
+                padding: 2px 0;
+                border-bottom: 1px solid #2d2d2d;
+              }
+              .dev-console-timestamp {
+                color: #6a9955;
+                flex-shrink: 0;
+              }
+              .dev-console-level {
+                flex-shrink: 0;
+                width: 50px;
+              }
+              .dev-console-message {
+                color: #d4d4d4;
+                word-break: break-all;
+                white-space: pre-wrap;
+              }
+              .dev-console-log .dev-console-level { color: #808080; }
+              .dev-console-info .dev-console-level { color: #4fc1ff; }
+              .dev-console-warn .dev-console-level { color: #dcdcaa; }
+              .dev-console-warn .dev-console-message { color: #dcdcaa; }
+              .dev-console-error .dev-console-level { color: #f14c4c; }
+              .dev-console-error .dev-console-message { color: #f14c4c; }
+              #dev-console-content::-webkit-scrollbar {
+                width: 8px;
+              }
+              #dev-console-content::-webkit-scrollbar-track {
+                background: #1e1e1e;
+              }
+              #dev-console-content::-webkit-scrollbar-thumb {
+                background: #404040;
+                border-radius: 4px;
+              }
+              #dev-console-content::-webkit-scrollbar-thumb:hover {
+                background: #505050;
+              }
+            </style>
+          \`;
+
+          // 找到内容区域并添加
+          const contentWrapper = settingsPage.querySelector('.Content_c1hxvhpe')?.parentElement;
+          if (contentWrapper) {
+            contentWrapper.appendChild(consoleSection);
+          }
+
+          // 清空按钮事件
+          const clearBtn = document.getElementById('dev-console-clear');
+          if (clearBtn) {
+            clearBtn.addEventListener('click', function() {
+              const consoleContent = document.getElementById('dev-console-content');
+              if (consoleContent) {
+                consoleContent.innerHTML = '';
+                state.consoleLogs = [];
+              }
+            });
+          }
+
+          // 渲染已有的日志
+          const consoleContent = document.getElementById('dev-console-content');
+          if (consoleContent && state.consoleLogs.length > 0) {
+            state.consoleLogs.forEach(entry => {
+              updateDevConsoleUI(entry);
+            });
+          }
+
+          console.log('[AVSession] Developer console UI injected');
+          return true;
+        }
+
+        // 监听设置页面出现
+        function observeSettingsPage() {
+          const observer = new MutationObserver(function(mutations) {
+            const settingsPage = document.getElementById('page_pc_setting');
+            if (settingsPage) {
+              // 延迟一点确保 DOM 完全加载
+              setTimeout(() => {
+                injectSettingsUI();
+                injectDevConsoleUI();
+              }, 100);
+            }
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+
+          // 初始检查
+          if (document.getElementById('page_pc_setting')) {
+            setTimeout(() => {
+              injectSettingsUI();
+              injectDevConsoleUI();
+            }, 100);
+          }
+        }
+
+        // 启动设置页面监听
+        observeSettingsPage();
 
         // ========== Howler.js 追踪 ==========
 
@@ -1247,6 +1876,26 @@ export class WebMusicBridge {
     return this.lyricService;
   }
 
+  /**
+   * 获取指定音质的歌曲 URL
+   * @param songId 歌曲 ID
+   * @param level 音质等级
+   * @returns 音质 URL，如果获取失败返回空字符串
+   */
+  public async fetchQualityUrl(songId: number, level: string): Promise<string> {
+    try {
+      const result = await this.qualityService.fetchQualityUrl(songId, level);
+      if (result && result.url) {
+        console.info(`[WebMusicBridge] Got quality URL for song ${songId}: ${result.level}`);
+        return result.url;
+      }
+      return '';
+    } catch (error) {
+      console.error(`[WebMusicBridge] Failed to fetch quality URL:`, error);
+      return '';
+    }
+  }
+
   // 获取桥接对象，用于注册到 Web 组件
   public getBridgeObject(): AVSessionBridgeObject {
     const bridgeObject: AVSessionBridgeObject = {
@@ -1259,6 +1908,12 @@ export class WebMusicBridge {
       },
       onSongInfoChange: (info: WebMediaInfo): void => {
         this.handleSongInfoChange(info);
+      },
+      onQualitySettingsChange: (enabled: boolean, level: string): void => {
+        this.saveQualitySettings(enabled, level);
+      },
+      fetchQualityUrl: async (songId: number, level: string): Promise<string> => {
+        return await this.fetchQualityUrl(songId, level);
       }
     };
     return bridgeObject;
@@ -1266,7 +1921,7 @@ export class WebMusicBridge {
 
   // 获取桥接对象的方法名列表，用于 javaScriptProxy
   public getBridgeMethodList(): string[] {
-    return ['onPlayStateChange', 'onTimeUpdate', 'onSongInfoChange'];
+    return ['onPlayStateChange', 'onTimeUpdate', 'onSongInfoChange', 'onQualitySettingsChange', 'fetchQualityUrl'];
   }
 }
 

@@ -7,6 +7,7 @@ import { webview } from '@kit.ArkWeb';
 import { emitter } from '@kit.BasicServicesKit';
 import { AVSessionService } from '../service/AVSessionService';
 import { PreferencesUtil } from '../utiles/PreferencesHelper';
+import { waitForCondition } from '../utiles/AsyncUtils';
 
 const DOMAIN = 0x0000;
 
@@ -51,9 +52,9 @@ export default class EntryAbility extends UIAbility {
     });
   }
 
-  onWindowStageCreate(windowStage: window.WindowStage): void {
+  async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
     let applicationContext = this.context.getApplicationContext();
-    
+
     //强制应用为深色模式
     //applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
     //强制应用为浅色模式
@@ -61,6 +62,15 @@ export default class EntryAbility extends UIAbility {
 
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
+
+    // 等待 PreferencesUtil 初始化完成后再加载页面
+    try {
+      await waitForCondition((): boolean => PreferencesUtil.isInitialized(), 50, 5000);
+      hilog.info(DOMAIN, 'testTag', '%{public}s', 'PreferencesUtil ready, loading content');
+    } catch (err) {
+      hilog.warn(DOMAIN, 'testTag', 'PreferencesUtil init timeout, loading content anyway');
+    }
+
     windowStage.loadContent('pages/Index', (err:BusinessError) => {
       let windowClass = windowStage.getMainWindowSync();
 
@@ -68,7 +78,7 @@ export default class EntryAbility extends UIAbility {
 
       if (deviceTypeInfo === '2in1'){
         windowClass?.setWindowDecorVisible(false); //不显示标题栏，为沉浸模式
-        windowClass?.setWindowDecorHeight(windowClass.getWindowDecorHeight() + 23);   
+        windowClass?.setWindowDecorHeight(windowClass.getWindowDecorHeight() + 23);
       }
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
