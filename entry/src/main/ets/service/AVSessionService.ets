@@ -52,6 +52,11 @@ export class AVSessionService {
     return AVSessionService.instance;
   }
 
+  // 获取 AVSession 实例
+  public getSession(): AVSessionManager.AVSession | null {
+    return this.session;
+  }
+
   // 初始化 AVSession
   public async initialize(context: common.UIAbilityContext): Promise<void> {
     this.context = context;

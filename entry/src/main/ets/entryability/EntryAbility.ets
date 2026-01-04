@@ -6,6 +6,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { webview } from '@kit.ArkWeb';
 import { emitter } from '@kit.BasicServicesKit';
 import { AVSessionService } from '../service/AVSessionService';
+import { PreferencesUtil } from '../utiles/PreferencesHelper';
 
 const DOMAIN = 0x0000;
 
@@ -23,6 +24,14 @@ export default class EntryAbility extends UIAbility {
     webview.WebviewController.enableBackForwardCache(features);
     webview.WebviewController.initializeWebEngine();
     AppStorage.setOrCreate("abilityWant", want);
+
+
+    // 初始化本地存储
+    PreferencesUtil.init(this.context).then(() => {
+      hilog.info(DOMAIN, 'testTag', '%{public}s', 'Preferences initialized successfully');
+    }).catch((err: BusinessError) => {
+      hilog.error(DOMAIN, 'testTag', 'Failed to initialize Preferences: %{public}s', JSON.stringify(err));
+    });
 
     // 初始化 AVSession
     this.avSessionService.initialize(this.context).then(() => {
