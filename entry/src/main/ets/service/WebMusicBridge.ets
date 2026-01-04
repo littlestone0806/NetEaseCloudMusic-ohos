@@ -1,6 +1,11 @@
 import { webview } from '@kit.ArkWeb';
 import { avSession as AVSessionManager } from '@kit.AVSessionKit';
 import { AVSessionService, MediaInfo, PlaybackInfo, AVSessionCallback } from './AVSessionService';
+import { PreferencesUtil } from '../utiles/PreferencesHelper';
+import { LyricService } from './LyricService';
+
+// 持久化存储的 key
+const LAST_SONG_ID_KEY = 'lastSongId';
 
 // 从网页端接收的媒体信息接口
 interface WebMediaInfo {
@@ -11,6 +16,7 @@ interface WebMediaInfo {
   duration?: number;
   picUrl?: string;
   isFavorite?: boolean;
+  songId?: number; // 网易云音乐歌曲 ID（通过网络请求拦截获取）
 }
 
 // 从网页端接收的播放状态接口
@@ -37,13 +43,50 @@ export interface AVSessionBridgeObject {
 export class WebMusicBridge {
   private controller: webview.WebviewController;
   private avSessionService: AVSessionService;
+  private lyricService: LyricService;
   private isInjected: boolean = false;
   private currentMediaId: string = '';
+  private currentSongId: number = 0; // 网易云音乐歌曲 ID（通过网络请求拦截获取）
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
     this.avSessionService = AVSessionService.getInstance();
+    this.lyricService = LyricService.getInstance();
     this.setupAVSessionCallbacks();
+    this.loadLastSongId();
+  }
+
+  // 从持久化存储加载上次保存的歌曲 ID
+  private loadLastSongId(): void {
+    try {
+      if (PreferencesUtil.isInitialized()) {
+        const lastSongId = PreferencesUtil.get<number>(LAST_SONG_ID_KEY, 0);
+        if (lastSongId && lastSongId > 0) {
+          this.currentSongId = lastSongId;
+          console.info(`[WebMusicBridge] Loaded last song ID from storage: ${lastSongId}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[WebMusicBridge] Failed to load last song ID: ${err}`);
+    }
+  }
+
+  // 保存歌曲 ID 到持久化存储
+  private saveSongId(songId: number): void {
+    if (songId <= 0) return;
+    try {
+      if (PreferencesUtil.isInitialized()) {
+        PreferencesUtil.put(LAST_SONG_ID_KEY, songId);
+        console.info(`[WebMusicBridge] Saved song ID to storage: ${songId}`);
+      }
+    } catch (err) {
+      console.error(`[WebMusicBridge] Failed to save song ID: ${err}`);
+    }
+  }
+
+  // 获取当前歌曲 ID（优先使用拦截到的 ID，否则使用持久化存储的 ID）
+  public getCurrentSongId(): number {
+    return this.currentSongId;
   }
 
   // 设置 AVSession 回调，将播控命令转发到网页
@@ -301,12 +344,19 @@ export class WebMusicBridge {
   public injectMusicMonitor(): void {
     if (this.isInjected) return;
 
+    // 获取上次保存的歌曲 ID，用于初始化
+    const lastSongId = this.currentSongId;
+
     const jsCode = `
       (function() {
         if (window.__avSessionInjected) return;
         window.__avSessionInjected = true;
 
         console.log('[AVSession] Injecting music monitor for NetEase Cloud Music...');
+
+        // 从 Native 层传入的上次保存的歌曲 ID
+        const LAST_SAVED_SONG_ID = ${lastSongId};
+        console.log('[AVSession] Last saved song ID from storage:', LAST_SAVED_SONG_ID);
 
         // 状态缓存
         const state = {
@@ -315,6 +365,7 @@ export class WebMusicBridge {
           isFavorite: false,
           loopMode: 'list',
           songId: '',
+          numericSongId: LAST_SAVED_SONG_ID, // 使用上次保存的歌曲 ID 作为初始值
           songName: '',
           artist: '',
           coverUrl: '',
@@ -325,8 +376,144 @@ export class WebMusicBridge {
           // Howler 追踪
           activeHowlId: null,
           howlInstances: new Map(), // id -> { howl, createdAt, lastSeek }
-          lastHowlCheck: 0
+          lastHowlCheck: 0,
+          // 网络拦截获取的歌曲 ID
+          interceptedSongId: LAST_SAVED_SONG_ID, // 使用上次保存的歌曲 ID 作为初始值
+          lastInterceptedSongId: 0
         };
+
+        // ========== 网络请求拦截 ==========
+        // 通过拦截 weapi/song/enhance/player/url/v1 接口获取真实歌曲 ID
+        const TARGET_PATH = 'weapi/song/enhance/player/url/v1';
+
+        // 拦截 XMLHttpRequest
+        const originalXhrOpen = XMLHttpRequest.prototype.open;
+        const originalXhrSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method, url, ...args) {
+          this._avSessionUrl = url;
+          return originalXhrOpen.apply(this, [method, url, ...args]);
+        };
+
+        XMLHttpRequest.prototype.send = function(body) {
+          this.addEventListener('load', function() {
+            if (this._avSessionUrl && this._avSessionUrl.indexOf(TARGET_PATH) > -1) {
+              try {
+                const res = JSON.parse(this.responseText);
+                if (res.data && res.data[0] && res.data[0].id) {
+                  const songId = res.data[0].id;
+                  console.log('[AVSession] XHR Intercepted song ID:', songId);
+                  state.interceptedSongId = songId;
+                  // 通知歌曲 ID 变化
+                  notifySongIdChange(songId);
+                }
+              } catch (e) {
+                console.error('[AVSession] XHR parse error:', e);
+              }
+            }
+          });
+          return originalXhrSend.apply(this, [body]);
+        };
+
+        // 拦截 Fetch
+        const originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+          const response = await originalFetch(...args);
+
+          let url = '';
+          if (typeof args[0] === 'string') url = args[0];
+          else if (args[0] instanceof Request) url = args[0].url;
+
+          if (url && url.indexOf(TARGET_PATH) > -1) {
+            const clone = response.clone();
+            clone.json().then(data => {
+              if (data.data && data.data[0] && data.data[0].id) {
+                const songId = data.data[0].id;
+                console.log('[AVSession] Fetch Intercepted song ID:', songId);
+                state.interceptedSongId = songId;
+                // 通知歌曲 ID 变化
+                notifySongIdChange(songId);
+              }
+            }).catch(err => console.error('[AVSession] Fetch parse error:', err));
+          }
+          return response;
+        };
+
+        console.log('[AVSession] Network interceptor installed for:', TARGET_PATH);
+
+        // 通知歌曲 ID 变化（当拦截到新的歌曲 ID 时调用）
+        function notifySongIdChange(songId) {
+          if (!songId || songId <= 0) {
+            console.warn('[AVSession] Invalid song ID received:', songId);
+            return;
+          }
+
+          if (songId === state.lastInterceptedSongId) {
+            console.log('[AVSession] Same song ID, skipping:', songId);
+            return;
+          }
+
+          console.log('[AVSession] New song ID detected:', songId, '(previous:', state.lastInterceptedSongId, ')');
+          state.lastInterceptedSongId = songId;
+          state.numericSongId = songId;
+
+          // 延迟获取歌曲信息，确保 UI 和 Howler 已更新
+          let retryCount = 0;
+          const maxRetries = 5;
+          const retryInterval = 200;
+
+          function tryNotify() {
+            retryCount++;
+            const { songName, artist, coverUrl } = getSongInfo();
+            const { duration } = getProgressInfo();
+
+            console.log('[AVSession] Try notify #' + retryCount + ':', songName, '-', artist, 'duration:', duration, 'songId:', songId);
+
+            // 验证数据有效性
+            if (!songName) {
+              if (retryCount < maxRetries) {
+                console.log('[AVSession] Song name not ready, retrying...');
+                setTimeout(tryNotify, retryInterval);
+                return;
+              }
+              console.warn('[AVSession] Failed to get song name after', maxRetries, 'retries');
+              return;
+            }
+
+            // 检查 duration 是否有效（大于 0 且合理）
+            if (duration <= 0 || duration > 3600) {
+              if (retryCount < maxRetries) {
+                console.log('[AVSession] Duration not ready:', duration, ', retrying...');
+                setTimeout(tryNotify, retryInterval);
+                return;
+              }
+              console.warn('[AVSession] Using potentially invalid duration:', duration);
+            }
+
+            const info = {
+              id: songName + '-' + artist,
+              name: songName,
+              artist: artist,
+              picUrl: coverUrl,
+              duration: duration,
+              isFavorite: state.isFavorite,
+              songId: songId
+            };
+
+            // 更新 state 中的歌曲信息
+            state.songId = info.id;
+            state.songName = songName;
+            state.artist = artist;
+            state.coverUrl = coverUrl;
+            state.duration = duration;
+
+            console.log('[AVSession] Notifying song change - ID:', songId, 'Name:', songName, 'Duration:', duration);
+            notifySongChange(info);
+          }
+
+          // 首次延迟 300ms 后开始尝试
+          setTimeout(tryNotify, 300);
+        }
 
         // ========== Howler.js 追踪 ==========
 
@@ -507,8 +694,18 @@ export class WebMusicBridge {
                 const authorEl = titleDiv.querySelector('.author') ||
                                 titleDiv.querySelector('[class*="author"]');
                 if (authorEl) {
-                  const authorLink = authorEl.querySelector('a');
-                  artist = authorLink?.textContent?.trim() || authorEl.textContent?.trim() || '';
+                  // 获取所有歌手链接，支持多歌手情况
+                  const authorLinks = authorEl.querySelectorAll('a');
+                  if (authorLinks.length > 0) {
+                    const artists = [];
+                    for (let i = 0; i < authorLinks.length; i++) {
+                      const name = authorLinks[i].textContent?.trim();
+                      if (name) artists.push(name);
+                    }
+                    artist = artists.join(' / ');
+                  } else {
+                    artist = authorEl.textContent?.trim() || '';
+                  }
                 }
               }
             }
@@ -523,12 +720,24 @@ export class WebMusicBridge {
               }
             }
             if (!artist) {
-              const artistSelectors = ['.author a', '[class*="artist"] a', '[class*="singer"] a'];
-              for (const sel of artistSelectors) {
-                const el = document.querySelector(sel);
-                if (el) {
-                  artist = el.textContent?.trim() || '';
-                  if (artist) break;
+              // 尝试获取所有歌手，支持多歌手情况
+              const artistContainers = ['.author', '[class*="artist"]', '[class*="singer"]'];
+              for (const containerSel of artistContainers) {
+                const container = document.querySelector(containerSel);
+                if (container) {
+                  const links = container.querySelectorAll('a');
+                  if (links.length > 0) {
+                    const artists = [];
+                    for (let i = 0; i < links.length; i++) {
+                      const name = links[i].textContent?.trim();
+                      if (name) artists.push(name);
+                    }
+                    artist = artists.join(' / ');
+                    if (artist) break;
+                  } else {
+                    artist = container.textContent?.trim() || '';
+                    if (artist) break;
+                  }
                 }
               }
             }
@@ -715,6 +924,8 @@ export class WebMusicBridge {
         }
 
         // ========== 主监控函数 ==========
+        // 注意：歌曲信息的上报完全由网络拦截器的 notifySongIdChange 负责
+        // monitor() 只负责播放状态、喜欢状态、循环模式的更新
 
         function monitor(forceNotify = false) {
           const isPlaying = checkPlayState();
@@ -722,7 +933,6 @@ export class WebMusicBridge {
           const loopMode = checkLoopMode();
           const { currentTime, duration } = getProgressInfo();
           const { songName, artist, coverUrl } = getSongInfo();
-          const songId = songName + '-' + artist;
 
           let stateChanged = false;
 
@@ -739,25 +949,34 @@ export class WebMusicBridge {
             stateChanged = true;
           }
 
-          // 状态变化或强制通知时上报
+          // 更新 duration（供 notifySongIdChange 使用）
+          if (duration > 0) {
+            state.duration = duration;
+          }
+
+          // 状态变化或强制通知时上报播放状态
           if (stateChanged || forceNotify) {
             notifyPlayStateChange(state.isPlaying, currentTime, duration, state.isFavorite, state.loopMode);
           }
 
-          // 歌曲变化时上报
-          if (songName && (songId !== state.songId || forceNotify)) {
+          // 强制通知时（初始化），上报当前歌曲信息
+          // 这是唯一在 monitor() 中上报歌曲信息的情况
+          if (forceNotify && songName) {
+            const songId = songName + '-' + artist;
+            const numericId = state.numericSongId || state.interceptedSongId || 0;
             state.songId = songId;
             state.songName = songName;
             state.artist = artist;
             state.coverUrl = coverUrl;
-            state.duration = duration;
+            console.log('[AVSession] Force notify (init) song:', songName, '-', artist, 'numericId:', numericId, 'duration:', duration);
             notifySongChange({
               id: songId,
               name: songName,
               artist: artist,
               picUrl: coverUrl,
               duration: duration,
-              isFavorite: state.isFavorite
+              isFavorite: state.isFavorite,
+              songId: numericId
             });
           }
 
@@ -947,6 +1166,16 @@ export class WebMusicBridge {
     if (mediaId === this.currentMediaId) return;
     this.currentMediaId = mediaId;
 
+    // 记录网易云音乐歌曲 ID（通过网络请求拦截获取）并保存到持久化存储
+    if (info.songId && info.songId > 0) {
+      this.currentSongId = info.songId;
+      this.saveSongId(info.songId); // 保存到持久化存储
+      console.info(`[WebMusicBridge] Intercepted song ID: ${info.songId}`);
+
+      // 自动获取歌词
+      this.fetchLyricForSong(info.songId);
+    }
+
     const mediaInfo: MediaInfo = {
       assetId: mediaId,
       title: info.name || '未知歌曲',
@@ -967,7 +1196,55 @@ export class WebMusicBridge {
       await this.avSessionService.setPlaybackState(playbackInfo);
     }
 
-    console.info(`[WebMusicBridge] Song: ${info.name} - ${info.artist}, duration: ${info.duration}s`);
+    console.info(`[WebMusicBridge] Song: ${info.name} - ${info.artist}, duration: ${info.duration}s, songId: ${this.currentSongId}`);
+  }
+
+  /**
+   * 获取指定歌曲的歌词并更新到 AVSession
+   * @param songId 歌曲 ID
+   */
+  private async fetchLyricForSong(songId: number): Promise<void> {
+    try {
+      console.info(`[WebMusicBridge] Fetching lyric for song ${songId}`);
+      const lyricData = await this.lyricService.fetchLyric(songId);
+
+      console.info(`[WebMusicBridge] Fetched lyric: ${lyricData.rawLyric}`)
+
+      // 将歌词更新到 AVSession metadata
+      if (lyricData.hasLyric && lyricData.rawLyric) {
+        await this.updateLyricToSession(lyricData.rawLyric);
+      }
+    } catch (error) {
+      console.error(`[WebMusicBridge] Failed to fetch lyric for song ${songId}:`, error);
+    }
+  }
+
+  /**
+   * 更新歌词到 AVSession metadata
+   * @param lyric 原始歌词文本（LRC 格式）
+   */
+  private async updateLyricToSession(lyric: string): Promise<void> {
+    try {
+      // 直接调用 session 的 setAVMetadata 只更新歌词字段
+      const session = this.avSessionService.getSession();
+      if (session) {
+        const metadata: AVSessionManager.AVMetadata = {
+          assetId: this.currentMediaId || '0',
+          lyric: lyric
+        };
+        await session.setAVMetadata(metadata);
+        console.info(`[WebMusicBridge] Lyric updated to AVSession, length: ${lyric.length}`);
+      }
+    } catch (error) {
+      console.error('[WebMusicBridge] Failed to update lyric to session:', error);
+    }
+  }
+
+  /**
+   * 获取歌词服务实例
+   */
+  public getLyricService(): LyricService {
+    return this.lyricService;
   }
 
   // 获取桥接对象，用于注册到 Web 组件
