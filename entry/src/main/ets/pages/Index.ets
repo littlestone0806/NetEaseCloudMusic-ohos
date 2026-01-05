@@ -1,12 +1,11 @@
 import { webview } from '@kit.ArkWeb';
-import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import { abilityAccessCtrl, common, ConfigurationConstant, Permissions } from '@kit.AbilityKit';
 import { DownloadConfirmDialog } from '../component/DownloadConfirmDialog'
 import { IAbstractDownloadHandler } from '../delegate/IWebDownloadFile'
 import { WebDownloadFileHelper } from '../delegate/WebDownloadFileImpl'
 import { EmitterUtil } from '../utiles/EmitterUtil'
-import { emitter } from '@kit.BasicServicesKit';
 import { WebMusicBridge, AVSessionBridgeObject } from '../service/WebMusicBridge';
 
 const url = "https://music.163.com/st/webplayer";  //网易云音乐
@@ -191,6 +190,9 @@ struct WebComponent {
       this.SelectionMenuBuilder();
     }
   }
+  /**
+              * @throws
+              */
   onBackPress() {
     // 当前页面是否可前进或者后退给定的step步(-1),正数代表前进，负数代表后退
     if (this.controller.accessStep(-1)) {
@@ -202,6 +204,9 @@ struct WebComponent {
       return false
     }
   }
+  /**
+              * @throws
+              */
   aboutToAppear(): void {
     //第一次启动设置一下cookie，默认为30s存储一次
     webview.WebCookieManager.configCookieSync(url, 'a=b', false, false);
@@ -219,7 +224,7 @@ struct WebComponent {
   }
   aboutToDisappear(): void {
     //关闭下载监听事件
-    EmitterUtil.off<number>('affffa', (event) => {
+    EmitterUtil.off<number>('affffa', () => {
     })
     //立刻将cookie写入磁盘，防止登录完成30s内关闭app，登录信息丢失
     webview.WebCookieManager.saveCookieAsync((error) => {
@@ -259,36 +264,16 @@ struct WebComponent {
   // get the window manager from AppStorage
   private windowStage = AppStorage.get('window') as window.WindowStage;
   private injectCustomJS(): void {
-    const jsScript = `
-       function modifyMainNavStyle() {
-         const navContainer = document.getElementById('page_pc_main_nav');
-         if (navContainer) {
-           navContainer.style.height = '60px';
-           navContainer.style.padding = '0 150px 0 40px';
-         } else {
-           setTimeout(modifyMainNavStyle, 100);
-         }
-       }
-       modifyMainNavStyle(); // 启动检测
-     `;
+    const jsScript = `function modifyMainNavStyle(){const e=document.getElementById("g-topbar"),t=document.getElementById("page_pc_main_nav");if(t?(t.style.height="60px",t.style.padding="0 150px 0 40px"):setTimeout(modifyMainNavStyle,100),e){e.style.display="none";const t=document.querySelector("#g_iframe");t.contentDocument.querySelector("#g_top").style.display="none",t.contentDocument.querySelector("#g_nav").style.display="none",t.contentDocument.querySelector("#login-wrapper > div > div._24X__coc > div > div > div.VIRS24XY").style.display="none",document.querySelector("body > div.g-btmbar").style.display="none",t.contentDocument.querySelector("body > div.g-ft").style.display="none",t.contentDocument.querySelector("#login-wrapper").style.top="50%",t.contentDocument.querySelector("#login-wrapper").style.left="50%",t.contentDocument.querySelector("#login-wrapper").style.transform="translate(-50%, -50%)",t.contentDocument.querySelector("#login-wrapper").style.zIndex="999",t.contentDocument.querySelector("#login-wrapper").style.position="fixed",t.contentDocument.querySelector("#login-wrapper").style.padding="0",t.contentDocument.querySelector("#login-wrapper").style.height="auto",t.contentDocument.querySelector("#login-wrapper").style.minHeight="0px"}else setTimeout(modifyMainNavStyle,100)}modifyMainNavStyle();`;
      try {
-       this.controller.runJavaScript(jsScript);
+       this.controller.runJavaScript(jsScript).catch(() => {
+         // TODO: Implement error handling.
+       });
      } catch (error) { }
   }
-  
   private detectBgColorAndSwitchMode() {
   // 读取网易云的“背景色”CSS 变量
-  const jsCode = `
-    (function(){
-      const bg = getComputedStyle(document.documentElement)
-                   .getPropertyValue('--colorSidebar1').trim();
-      const m = bg.match(/\\d+/g);
-      if(!m || m.length<3) return 'unknown';
-      const [r,g,b] = m.map(Number);
-      return (r==255 && g==255 && b==255) ? 'dark':'light';
-    })();
-  `;
-  
+  const jsCode = `(function(){const bg=getComputedStyle(document.documentElement).getPropertyValue('--colorSidebar1').trim();const m=bg.match(/\\d+/g);if(!m||m.length<3)return'unknown';const[r,g,b]=m.map(Number);return(r==255&&g==255&&b==255)?'dark':'light'})();`;
   // 调用runJavaScript时的回调处理
   this.controller.runJavaScript(jsCode, (err, res) => {
     // 先进行trim()去除空白字符，然后使用正则去除外部引号
@@ -301,26 +286,44 @@ struct WebComponent {
       
       if (trimmedRes === 'dark') {
         const applicationContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-        applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+        if (deviceInfo.sdkApiVersion >= 18) {
+          try {
+            applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+          } catch (error) {
+            // TODO: Implement error handling.
+          }
+        } else {
+            // Fallback to an earlier version
+          }
       } else {
         const applicationContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-        applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
+        try {
+          applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
+        } catch (error) {
+          // TODO: Implement error handling.
+        }
       }
     }
   });
 }
-   
+  @State hideFlage:Visibility = Visibility.Hidden;
   build() {
     Column() {
       Web({ src: url, controller: this.controller })
+        .visibility(this.hideFlage)
         .layoutWeight(1) //设置layoutWeight属性优先保证web控件的大小，不至于被Blank给挤出去造成下方显示不全
         .hitTestBehavior(HitTestMode.Transparent)
         //当组件大小改变时，获取窗体大小，用于给右键菜单定位
         .onSizeChange((oldValue: SizeOptions, newValue: SizeOptions) => {
           window.getLastWindow(this.uiContext.getHostContext()).then((data) => {
-            const properties = data?.getWindowProperties();
-            this.window_width = properties.windowRect.width;
-            this.window_height = properties.windowRect.height;
+            try {
+              const properties = data?.getWindowProperties();
+              this.window_width = properties.windowRect.width;
+              this.window_height = properties.windowRect.height;
+            } catch (error) {
+              // TODO: Implement error handling.
+            }
+
           });
         })
         // 触发右键菜单
@@ -381,7 +384,11 @@ struct WebComponent {
           })
         .onControllerAttached(() => {
           //设置web的UA
-          if(setPCUserAgent)this.controller.setCustomUserAgent("Mozilla/5.0 (PC; Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 htbrowser")
+          if (setPCUserAgent) try {
+            this.controller.setCustomUserAgent("Mozilla/5.0 (PC; Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 htbrowser")
+          } catch (error) {
+            // TODO: Implement error handling.
+          }
           this.webDownloadFile.setDownloadDelegate(this.controller)
         })
       .backgroundColor(Color.Transparent) //设置浏览器加载时的背景色
@@ -407,7 +414,11 @@ struct WebComponent {
         this.webIsVisible = isVisible;
         if (isVisible && this.needReloadWhenVisible) { // Web组件可见时重新加载页面。
           this.needReloadWhenVisible = false;
-          this.controller.loadUrl(url);
+          try {
+            this.controller.loadUrl(url);
+          } catch (error) {
+            // TODO: Implement error handling.
+          }
         }
       })
       //js注入，实现右上角图标的避开和AVSession音乐监听
@@ -418,6 +429,9 @@ struct WebComponent {
         setInterval(() => {
           this.detectBgColorAndSwitchMode();
         }, 300);
+        setTimeout(()=>{
+          this.hideFlage = Visibility.Visible;    // 等待JS注入完成后展示Web组件
+        },2500)
       })
       // 应用监听渲染子进程异常退出回调，并进行异常处理。
       .onRenderExited((event) => {
@@ -441,7 +455,11 @@ struct WebComponent {
         }
         if (this.webIsVisible) {
           // Web组件可见则立即重新加载。
-          this.controller.loadUrl(url);
+          try {
+            this.controller.loadUrl(url);
+          } catch (error) {
+            // TODO: Implement error handling.
+          }
           return;
         }
         // Web组件不可见时不立即重新加载。

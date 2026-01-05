@@ -2,6 +2,7 @@
 /oh_modules
 /local.properties
 /.idea
+/.bifun
 **/build
 /.hvigor
 .cxx
