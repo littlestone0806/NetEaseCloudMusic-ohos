@@ -10,7 +10,7 @@ import { WebMusicBridge, AVSessionBridgeObject } from '../service/WebMusicBridge
 
 const url = "https://music.163.com/st/webplayer";  //网易云音乐
 
-const setPCUserAgent = false;  //是否强制使用PC的UA,false为自适应UA
+const setPCUserAgent = true;  //是否强制使用PC的UA,false为自适应UA
 
 // 定义菜单类型枚举
 enum MenuType {
@@ -22,29 +22,6 @@ enum MenuType {
 
 // 全局变量存储检测网页为dark还是light的值
 let lastTrimmedRes: string | null = null;
-
-//申请全局剪切板权限
-const permissions: Array<Permissions> = ['ohos.permission.READ_PASTEBOARD'];
-// 使用UIExtensionAbility：将common.UIAbilityContext 替换为common.UIExtensionContext
-function reqPermissionsFromUser(permissions: Array<Permissions>, context: common.UIAbilityContext): void {
-  let atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
-  // requestPermissionsFromUser会判断权限的授权状态来决定是否唤起弹窗
-  atManager.requestPermissionsFromUser(context, permissions).then((data) => {
-    let grantStatus: Array<number> = data.authResults;
-    let length: number = grantStatus.length;
-    for (let i = 0; i < length; i++) {
-      if (grantStatus[i] === 0) {
-        // 用户授权，可以继续访问目标操作
-      } else {
-        // 用户拒绝授权，提示用户必须授权才能访问当前页面的功能，并引导用户到系统设置中打开相应的权限
-        return;
-      }
-    }
-    // 授权成功
-  }).catch((err: BusinessError) => {
-    console.error(`Failed to request permissions from user. Code is ${err.code}, message is ${err.message}`);
-  })
-}
 
 @Entry
 @Component
@@ -91,109 +68,6 @@ struct WebComponent {
   uiContext: UIContext = this.getUIContext();
   @State isPageLoading: boolean = true;
 
-  // 图片菜单构建器
-  @Builder
-  ImageMenuBuilder() {
-    Menu() {
-      MenuItem({ content: '复制图片' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          this.result?.copyImage();
-          this.showMenu = false;
-        })
-    }
-    .width(100)
-    .height(50)
-  }
-  // 链接菜单构建器
-  @Builder
-  LinkMenuBuilder() {
-    Menu() {
-      MenuItem({ content: '复制链接' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          let pasteData = pasteboard.createData('text/plain', this.linkUrl);
-          pasteboard.getSystemPasteboard().setData(pasteData, (error) => {
-            if (error) {
-              return;
-            }
-          })
-          this.showMenu = false;
-        })
-    }
-    .width(100)
-    .height(50)
-  }
-  // 可编辑区域菜单构建器
-  @Builder
-  EditableMenuBuilder() {
-    Menu() {
-      MenuItem({ content: '剪切' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          this.result?.cut();
-          this.showMenu = false;
-        })
-      MenuItem({ content: '复制' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          this.result?.copy();
-          this.showMenu = false;
-        })
-      MenuItem({ content: '粘贴' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          this.result?.paste();
-          this.showMenu = false;
-        })
-      MenuItem({ content: '全选' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          this.result?.selectAll();
-          this.showMenu = false;
-        })
-    }
-    .width(100)
-    .height(200)
-  }
-  // 选中文本菜单构建器
-  @Builder
-  SelectionMenuBuilder() {
-    Menu() {
-      MenuItem({ content: '复制' })
-        .width(100)
-        .height(50)
-        .onClick(() => {
-          this.result?.copy();
-          this.showMenu = false;
-        })
-    }
-    .width(100)
-    .height(50)
-  }
-
-  // 动态菜单构建器（根据类型选择）
-  @Builder
-  MenuBuilder() {
-    if (this.currentMenuType === MenuType.IMAGE) {
-      this.ImageMenuBuilder();
-    } else if (this.currentMenuType === MenuType.LINK) {
-      this.LinkMenuBuilder();
-    } else if (this.currentMenuType === MenuType.EDITABLE) {
-      this.EditableMenuBuilder();
-    } else if (this.currentMenuType === MenuType.SELECTION) {
-      this.SelectionMenuBuilder();
-    }
-  }
-  /**
-              * @throws
-              */
   onBackPress() {
     // 当前页面是否可前进或者后退给定的step步(-1),正数代表前进，负数代表后退
     if (this.controller.accessStep(-1)) {
@@ -205,15 +79,12 @@ struct WebComponent {
       return false
     }
   }
-  /**
-              * @throws
-              */
+
   aboutToAppear(): void {
     //第一次启动设置一下cookie，默认为30s存储一次
     webview.WebCookieManager.configCookieSync(url, 'a=b', false, false);
     // 使用UIExtensionAbility：将common.UIAbilityContext 替换为common.UIExtensionContext
     const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    reqPermissionsFromUser(permissions, context);
     //定义下载监听事件
     EmitterUtil.on<number>('affffa', (event) => {
       if (event?.data === 1) {
@@ -260,7 +131,7 @@ struct WebComponent {
       }
     })
     .width('100%')
-    .height(22)
+    .height(25)
   }
   // get the window manager from AppStorage
   private windowStage = AppStorage.get('window') as window.WindowStage;
@@ -369,20 +240,6 @@ struct WebComponent {
           this.showMenu = true;
           return true;
         })
-        .bindPopup(this.showMenu,
-          {
-            builder: this.MenuBuilder(),
-            enableArrow: false,
-            placement: Placement.RightBottom,
-            offset: { x: this.offsetX, y: this.offsetY },
-            mask: false,
-            onStateChange: (e) => {
-              if (!e.isVisible) {
-                this.showMenu = false;
-                this.result!.closeContextMenu();
-              }
-            }
-          })
         .onControllerAttached(() => {
           //设置web的UA
           if (setPCUserAgent) try {
