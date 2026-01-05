@@ -89,6 +89,7 @@ struct WebComponent {
   @State showMenu: boolean = false;
   @State currentMenuType: MenuType = MenuType.IMAGE; // 当前菜单类型
   uiContext: UIContext = this.getUIContext();
+  @State isPageLoading: boolean = true;
 
   // 图片菜单构建器
   @Builder
@@ -308,7 +309,7 @@ struct WebComponent {
 }
   @State hideFlage:Visibility = Visibility.Hidden;
   build() {
-    Column() {
+    Stack() {
       Web({ src: url, controller: this.controller })
         .visibility(this.hideFlage)
         .layoutWeight(1) //设置layoutWeight属性优先保证web控件的大小，不至于被Blank给挤出去造成下方显示不全
@@ -429,9 +430,8 @@ struct WebComponent {
         setInterval(() => {
           this.detectBgColorAndSwitchMode();
         }, 300);
-        setTimeout(()=>{
-          this.hideFlage = Visibility.Visible;    // 等待JS注入完成后展示Web组件
-        },2500)
+        this.hideFlage = Visibility.Visible;
+        this.isPageLoading = false;
       })
       // 应用监听渲染子进程异常退出回调，并进行异常处理。
       .onRenderExited((event) => {
@@ -467,7 +467,16 @@ struct WebComponent {
       })
       .onErrorReceive((event) => {
         console.error('onErrorReceive event:', JSON.stringify(event));
+        this.isPageLoading = false;
       })
+      if (this.isPageLoading) {
+        LoadingProgress().width(100).height(100)
+          .transition(TransitionEffect.OPACITY.animation({duration: 150}))
+          .alignRules({
+            center: { anchor: "__container__", align: VerticalAlign.Center },
+            middle: { anchor: "__container__", align: HorizontalAlign.Center }
+          })
+      }
     }
     .width('100%')
     .height('100%')
