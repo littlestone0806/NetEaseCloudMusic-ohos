@@ -53,13 +53,6 @@ export default class EntryAbility extends UIAbility {
   }
 
   async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
-    let applicationContext = this.context.getApplicationContext();
-
-    //强制应用为深色模式
-    //applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-    //强制应用为浅色模式
-    //applicationContext.setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
-
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 

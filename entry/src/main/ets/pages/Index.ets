@@ -185,61 +185,6 @@ struct WebComponent {
         .visibility(this.hideFlage)
         .layoutWeight(1) //设置layoutWeight属性优先保证web控件的大小，不至于被Blank给挤出去造成下方显示不全
         .hitTestBehavior(HitTestMode.Transparent)
-        //当组件大小改变时，获取窗体大小，用于给右键菜单定位
-        .onSizeChange((oldValue: SizeOptions, newValue: SizeOptions) => {
-          window.getLastWindow(this.uiContext.getHostContext()).then((data) => {
-            try {
-              const properties = data?.getWindowProperties();
-              this.window_width = properties.windowRect.width;
-              this.window_height = properties.windowRect.height;
-            } catch (error) {
-              // TODO: Implement error handling.
-            }
-
-          });
-        })
-        // 触发右键菜单
-        .onContextMenuShow((event) => {
-          if (event) {
-            this.result = event.result;
-            this.linkUrl = event.param.getLinkUrl();
-            //当为不可编辑内容时
-            if(event.param.isEditable() == false){
-              //当为图片资源时
-              if(event.param.getMediaType() === 1) {
-                this.currentMenuType = MenuType.IMAGE;
-                this.menu_height = 50;
-              }
-              else{
-                //当选中了不可编辑的文字时
-                if(event.param.getSelectionText() != ""){
-                  this.currentMenuType = MenuType.SELECTION;
-                  this.menu_height = 50;
-                }
-                else{
-                  //当点击目标是链接时
-                  if(event.param.getUnfilteredLinkUrl() != ""){
-                    this.currentMenuType = MenuType.LINK;
-                    this.menu_height = 50;
-                  }
-                  else{
-                    return false;
-                  }
-                }
-              }
-            }
-            //当为可编辑内容时
-            else{
-              this.currentMenuType = MenuType.EDITABLE;
-              this.menu_height = 200;
-            }
-          }
-          // 获取鼠标位置并转换为vp单位
-          this.offsetX = this.uiContext.px2vp(event.param.x() - this.window_width / 2) + 50;
-          this.offsetY = this.uiContext.px2vp(event.param.y() - this.window_height / 2) + this.menu_height/2;
-          this.showMenu = true;
-          return true;
-        })
         .onControllerAttached(() => {
           //设置web的UA
           if (setPCUserAgent) try {
