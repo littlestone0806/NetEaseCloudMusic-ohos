@@ -226,7 +226,8 @@ struct WebComponent {
       })
       //js注入，实现右上角图标的避开和AVSession音乐监听
       .onPageEnd(() => {
-        this.injectCustomJS();
+        //注入右上三键避让
+        if(deviceInfo.deviceType === '2in1')this.injectCustomJS();
         // 注入 AVSession 音乐监听器
         this.musicBridge.injectMusicMonitor();
         setInterval(() => {
